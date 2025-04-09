@@ -169,4 +169,123 @@ class ReportGenerator:
             font-size: 48px;
             font-weight: bold;
             text-align: center;
-            margin: 20px
+            margin: 20px 0 auto;;
+        }}
+        
+        .score span {{
+            font-size: 24px;
+            color: var(--secondary-color);
+        }}
+        
+        .section {{
+            margin-bottom: 40px;
+        }}
+        
+        .section h2 {{
+            border-bottom: 2px solid var(--primary-color);
+            padding-bottom: 10px;
+        }}
+        
+        table {{
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 20px;
+        }}
+        
+        table th, table td {{
+            border: 1px solid var(--border-color);
+            padding: 10px;
+            text-align: left;
+        }}
+        
+        table th {{
+            background-color: var(--primary-color);
+            color: white;
+        }}
+        
+        table tr:nth-child(even) {{
+            background-color: var(--background-color);
+        }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Code Analysis Report</h1>
+            <h2>{analysis.repository["name"]}</h2>
+        </header>
+        
+        <div class="card summary-card">
+            <h2>Summary</h2>
+            <p>{analysis.final_report.get("summary", "No summary available.")}</p>
+            <div class="score">
+                {analysis.final_report.get("overall_score", 0)}
+                <span>/ 10</span>
+            </div>
+        </div>
+        
+        <div class="section">
+            <h2>Strengths</h2>
+            <ul>
+                {"".join(f"<li>{strength}</li>" for strength in analysis.final_report.get("strengths", []))}
+            </ul>
+        </div>
+        
+        <div class="section">
+            <h2>Weaknesses</h2>
+            <ul>
+                {"".join(f"<li>{weakness}</li>" for weakness in analysis.final_report.get("weaknesses", []))}
+            </ul>
+        </div>
+        
+        <div class="section">
+            <h2>Recommendations</h2>
+            <ul>
+                {"".join(f"<li>{rec['title']}: {rec['description']} (Priority: {rec['priority']})</li>" for rec in analysis.final_report.get("recommendations", []))}
+            </ul>
+        </div>
+        
+        <div class="section">
+            <h2>Top Issues</h2>
+            <table>
+                <thead>
+                    <tr>
+                        <th>File</th>
+                        <th>Issue</th>
+                        <th>Recommendation</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {"".join(f"<tr><td>{issue['file']}</td><td>{issue['issue']}</td><td>{issue['recommendation']}</td></tr>" for issue in analysis.final_report.get('top_issues', []))}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</body>
+</html>
+"""
+        return html
+    
+    async def _generate_markdown_report(self, analysis: RepositoryAnalysis) -> str:
+        """Generate a Markdown report"""
+        markdown = f"# Code Analysis Report - {analysis.repository['name']}\n\n"
+        markdown += f"**Summary:** {analysis.final_report.get('summary', 'No summary available.')}\n\n"
+        markdown += f"**Overall Score:** {analysis.final_report.get('overall_score', 0)} / 10\n\n"
+        
+        markdown += "## Strengths\n"
+        markdown += "\n".join(f"- {strength}" for strength in analysis.final_report.get("strengths", [])) + "\n\n"
+        
+        markdown += "## Weaknesses\n"
+        markdown += "\n".join(f"- {weakness}" for weakness in analysis.final_report.get("weaknesses", [])) + "\n\n"
+        
+        markdown += "## Recommendations\n"
+        for rec in analysis.final_report.get("recommendations", []):
+            markdown += f"- **{rec['title']}**: {rec['description']} (Priority: {rec['priority']})\n"
+        
+        markdown += "\n## Top Issues\n"
+        markdown += "| File | Issue | Recommendation |\n"
+        markdown += "|------|-------|----------------|\n"
+        for issue in analysis.final_report.get("top_issues", []):
+            markdown += f"| {issue['file']} | {issue['issue']} | {issue['recommendation']} |\n"
+        
+        return markdown
