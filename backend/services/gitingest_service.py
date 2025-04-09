@@ -1,164 +1,101 @@
-import httpx
-import logging
-from config.settings import settings
-from bs4 import BeautifulSoup
-import re
 import os
-import tempfile
-import subprocess
-from typing import Dict, List, Tuple, Optional
+import shutil
+import uuid
+from git import Repo
+from typing import List, Dict, Optional, Tuple
+from pathlib import Path
 
-logger = logging.getLogger(__name__)
+from config.settings import settings
+from models.repository import Repository, Directory, FileInfo, RepositoryStatus
 
 class GitIngestService:
-    """Service to fetch repository contents using GitIngest or direct Git clone."""
+    def __init__(self, base_dir: str = settings.REPO_CLONE_DIR):
+        self.base_dir = base_dir
+        os.makedirs(self.base_dir, exist_ok=True)
     
-    def __init__(self):
-        self.base_url = settings.GITINGEST_BASE_URL
-        self.headers = {
-            "User-Agent": "Code-Analysis-System/1.0"
-        }
-    
-    async def fetch_repository(self, repo_url: str) -> Dict:
-        """Fetch repository content using GitIngest"""
+    async def clone_repository(self, repo_url: str, branch: str = "main") -> Repository:
+        """Clone a git repository and return a Repository object"""
+        repo_id = str(uuid.uuid4())
+        clone_path = os.path.join(self.base_dir, repo_id)
+        
+        repository = Repository(
+            id=repo_id,
+            url=repo_url,
+            branch=branch,
+            status=RepositoryStatus.CLONING,
+            clone_path=clone_path
+        )
+        
         try:
-            # Convert GitHub URL to GitIngest URL
-            if "github.com" in repo_url:
-                ingested_url = repo_url.replace("github.com", "gitingest.com")
-            else:
-                ingested_url = f"{self.base_url}/{repo_url}"
-            
-            logger.info(f"Fetching repo from: {ingested_url}")
-            
-            async with httpx.AsyncClient(headers=self.headers) as client:
-                response = await client.get(ingested_url, timeout=60.0)
-                
-            if response.status_code != 200:
-                logger.error(f"Failed to fetch repo: {response.status_code}")
-                return {"status": "error", "message": f"Failed to fetch repository: {response.status_code}"}
-                
-            # Parse the GitIngest response
-            return self._parse_gitingest_response(response.text, repo_url)
-            
+            # Clone the repository
+            Repo.clone_from(repo_url, clone_path, branch=branch)
+            repository.status = RepositoryStatus.PENDING
+            repository.structure = await self.analyze_directory_structure(clone_path)
+            return repository
         except Exception as e:
-            logger.exception(f"Error fetching repository: {str(e)}")
-            return {"status": "error", "message": f"Error: {str(e)}"}
+            repository.status = RepositoryStatus.FAILED
+            repository.error = str(e)
+            # Clean up failed clone
+            if os.path.exists(clone_path):
+                shutil.rmtree(clone_path)
+            raise e
     
-    def _parse_gitingest_response(self, html_content: str, repo_url: str) -> Dict:
-        """Parse the GitIngest HTML response to extract repository structure and file contents"""
-        soup = BeautifulSoup(html_content, 'html.parser')
+    async def analyze_directory_structure(self, dir_path: str, rel_path: str = "") -> Directory:
+        """Recursively analyze directory structure"""
+        abs_path = os.path.join(dir_path, rel_path)
+        directory = Directory(path=rel_path or "/")
         
-        # Extract repo metadata
-        repo_name = repo_url.split('/')[-1]
-        owner = repo_url.split('/')[-2] if len(repo_url.split('/')) > 4 else "unknown"
+        # Skip .git directory
+        if ".git" in abs_path:
+            return directory
         
-        # Extract files from the page
-        files = []
-        file_divs = soup.find_all('div', class_='file-content')
-        
-        for div in file_divs:
-            file_path = div.get('data-path', '')
-            if not file_path:
+        for item in os.listdir(abs_path):
+            item_rel_path = os.path.join(rel_path, item)
+            item_abs_path = os.path.join(abs_path, item)
+            
+            # Skip hidden files and directories
+            if item.startswith('.'):
                 continue
                 
-            file_content = div.text.strip()
+            if os.path.isfile(item_abs_path):
+                # Check file size to avoid very large files
+                file_size = os.path.getsize(item_abs_path)
+                if file_size <= settings.MAX_FILE_SIZE_KB * 1024:
+                    file_info = FileInfo(
+                        path=item_rel_path,
+                        size=file_size,
+                        extension=os.path.splitext(item)[1],
+                    )
+                    directory.files.append(file_info)
+            elif os.path.isdir(item_abs_path):
+                subdir = await self.analyze_directory_structure(dir_path, item_rel_path)
+                directory.subdirectories.append(subdir)
+        
+        return directory
+    
+    async def get_file_content(self, repository: Repository, file_path: str) -> Optional[str]:
+        """Get content of a file in the repository"""
+        if not repository.clone_path:
+            return None
             
-            files.append({
-                "path": file_path,
-                "content": file_content,
-                "size": len(file_content),
-                "extension": os.path.splitext(file_path)[1][1:] if '.' in file_path else ""
-            })
+        full_path = os.path.join(repository.clone_path, file_path)
         
-        # Construct directory structure
-        structure = self._build_directory_structure(files)
-        
-        return {
-            "status": "success",
-            "repository": {
-                "name": repo_name,
-                "owner": owner,
-                "url": repo_url,
-            },
-            "structure": structure,
-            "files": files
-        }
-    
-    def _build_directory_structure(self, files: List[Dict]) -> Dict:
-        """Build a tree representation of the directory structure"""
-        root = {"name": "/", "type": "directory", "children": {}}
-        
-        for file in files:
-            path_parts = file["path"].split('/')
-            current = root
+        if not os.path.exists(full_path) or not os.path.isfile(full_path):
+            return None
             
-            # Navigate through directories
-            for i, part in enumerate(path_parts):
-                if i == len(path_parts) - 1:  # This is a file
-                    if "files" not in current:
-                        current["files"] = []
-                    current["files"].append({
-                        "name": part,
-                        "path": file["path"],
-                        "extension": file["extension"]
-                    })
-                else:  # This is a directory
-                    if part not in current["children"]:
-                        current["children"][part] = {
-                            "name": part, 
-                            "type": "directory", 
-                            "children": {}
-                        }
-                    current = current["children"][part]
-        
-        return self._flatten_structure(root)
-    
-    def _flatten_structure(self, node: Dict) -> Dict:
-        """Convert the nested dictionary structure to a more front-end friendly format"""
-        result = {
-            "name": node["name"],
-            "type": node["type"],
-            "children": []
-        }
-        
-        # Add files to children
-        if "files" in node:
-            for file in node["files"]:
-                result["children"].append({
-                    "name": file["name"],
-                    "type": "file",
-                    "path": file["path"],
-                    "extension": file["extension"],
-                })
-        
-        # Process subdirectories
-        if "children" in node and isinstance(node["children"], dict):
-            for child_name, child_node in node["children"].items():
-                result["children"].append(self._flatten_structure(child_node))
-        
-        return result
-    
-    async def clone_repository(self, repo_url: str) -> Optional[str]:
-        """Alternative method: Clone the repository to a temporary directory"""
         try:
-            temp_dir = tempfile.mkdtemp()
-            
-            # Clone the repo
-            process = subprocess.run(
-                ["git", "clone", "--depth", "1", repo_url, temp_dir],
-                check=True,
-                capture_output=True,
-                text=True
-            )
-            
-            return temp_dir
-            
-        except subprocess.CalledProcessError as e:
-            logger.error(f"Git clone failed: {e.stderr}")
+            with open(full_path, 'r', encoding='utf-8') as f:
+                return f.read()
+        except Exception:
+            # For binary files or encoding issues, return None
             return None
-        except Exception as e:
-            logger.exception(f"Repository cloning failed: {str(e)}")
-            return None
-
-# Instance to be imported by other modules
-gitingest_service = GitIngestService()
+    
+    async def cleanup_repository(self, repository: Repository) -> bool:
+        """Remove cloned repository directory"""
+        if repository.clone_path and os.path.exists(repository.clone_path):
+            try:
+                shutil.rmtree(repository.clone_path)
+                return True
+            except Exception:
+                return False
+        return False

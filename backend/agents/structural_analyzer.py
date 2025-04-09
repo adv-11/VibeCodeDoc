@@ -1,160 +1,205 @@
-import logging
 from typing import Dict, List, Any
 import os
-from services.llm_service import llm_service
+import statistics
 
-logger = logging.getLogger(__name__)
+from models.repository import Repository
+from models.analysis import StructuralAnalysis
+from core.repo_ingestion import extract_language_stats
 
-class StructuralAnalyzer:
-    """Agent responsible for analyzing the structural aspects of a codebase"""
+async def analyze_repository_structure(repository: Repository, files_content: Dict[str, str]) -> StructuralAnalysis:
+    """Analyze the structural aspects of a repository"""
     
-    def __init__(self):
-        self.logger = logging.getLogger(__name__)
+    # Count files and directories
+    file_count = 0
+    directory_set = set()
     
-    async def analyze_structure(self, repository: Dict) -> Dict:
-        """Analyze the repository structure"""
-        try:
-            # Get structure analysis from LLM
-            structure_analysis = await llm_service.analyze_repository_structure(repository)
-            
-            if structure_analysis["status"] != "success":
-                self.logger.error(f"Structure analysis failed: {structure_analysis['message']}")
-                return structure_analysis
-            
-            # Enhance with language statistics
-            structure_analysis["data"]["language_statistics"] = self._calculate_language_statistics(repository)
-            
-            # Analyze file distribution
-            structure_analysis["data"]["file_distribution"] = self._analyze_file_distribution(repository)
-            
-            return structure_analysis
-            
-        except Exception as e:
-            self.logger.exception(f"Error in structural analysis: {str(e)}")
-            return {
-                "status": "error",
-                "message": f"Error in structural analysis: {str(e)}"
-            }
+    for file_path in files_content.keys():
+        file_count += 1
+        # Add all parent directories to the set
+        path_parts = file_path.split('/')
+        for i in range(len(path_parts)):
+            directory = '/'.join(path_parts[:i])
+            if directory:
+                directory_set.add(directory)
     
-    def _calculate_language_statistics(self, repository: Dict) -> Dict:
-        """Calculate statistics about programming languages used in the repository"""
-        language_counts = {}
-        language_bytes = {}
-        total_bytes = 0
-        
-        # Map of file extensions to languages
-        ext_to_language = {
-            "py": "Python",
-            "js": "JavaScript",
-            "ts": "TypeScript",
-            "jsx": "React JSX",
-            "tsx": "React TSX",
-            "java": "Java",
-            "c": "C",
-            "cpp": "C++",
-            "h": "C/C++ Header",
-            "hpp": "C++ Header",
-            "cs": "C#",
-            "go": "Go",
-            "rb": "Ruby",
-            "php": "PHP",
-            "swift": "Swift",
-            "kt": "Kotlin",
-            "rs": "Rust",
-            "html": "HTML",
-            "css": "CSS",
-            "scss": "SCSS",
-            "sass": "Sass",
-            "less": "Less",
-            "json": "JSON",
-            "xml": "XML",
-            "yaml": "YAML",
-            "yml": "YAML",
-            "md": "Markdown",
-            "txt": "Plain Text",
-            "sh": "Shell",
-            "bat": "Batch",
-            "ps1": "PowerShell",
-            "sql": "SQL",
-            "r": "R",
-            "m": "Objective-C",
-            "mm": "Objective-C++",
-            "dart": "Dart",
-            "lua": "Lua",
-            "pl": "Perl",
-            "pm": "Perl",
-            "scala": "Scala",
-            "clj": "Clojure",
-            "ex": "Elixir",
-            "exs": "Elixir",
-            "hs": "Haskell",
-            "erl": "Erlang",
-            "fs": "F#",
-            "fsx": "F#",
-            "vue": "Vue",
-            "svelte": "Svelte",
-        }
-        
-        for file in repository["files"]:
-            # Get extension without leading dot
-            ext = file.get("extension", "").lower()
-            
-            # Determine language based on extension
-            language = ext_to_language.get(ext, "Other")
-            
-            # Update counts
-            language_counts[language] = language_counts.get(language, 0) + 1
-            
-            # Update bytes
-            file_size = file.get("size", 0)
-            language_bytes[language] = language_bytes.get(language, 0) + file_size
-            total_bytes += file_size
-        
-        # Calculate percentages
-        language_percentages = {}
-        for lang, bytes_count in language_bytes.items():
-            if total_bytes > 0:
-                language_percentages[lang] = round((bytes_count / total_bytes) * 100, 2)
-            else:
-                language_percentages[lang] = 0
-        
-        return {
-            "language_counts": language_counts,
-            "language_bytes": language_bytes,
-            "language_percentages": language_percentages,
-            "total_files": len(repository["files"]),
-            "total_bytes": total_bytes,
-            "primary_language": max(language_counts.items(), key=lambda x: x[1])[0] if language_counts else "Unknown"
+    directory_count = len(directory_set)
+    
+    # Calculate language breakdown
+    language_breakdown = await extract_language_stats(repository)
+    
+    # Calculate complexity metrics
+    complexity_metrics = await calculate_complexity_metrics(files_content)
+    
+    # Build dependency graph
+    dependency_graph = await build_dependency_graph(files_content)
+    
+    return StructuralAnalysis(
+        file_count=file_count,
+        directory_count=directory_count,
+        language_breakdown=language_breakdown,
+        complexity_metrics=complexity_metrics,
+        dependency_graph=dependency_graph
+    )
+
+async def calculate_complexity_metrics(files_content: Dict[str, str]) -> Dict[str, Any]:
+    """Calculate complexity metrics for the codebase"""
+    metrics = {
+        "average_complexity": 0,
+        "max_complexity": 0,
+        "average_lines_per_file": 0,
+        "max_lines": 0,
+        "average_function_length": 0,
+        "file_size_distribution": {}
+    }
+    
+    # Calculate line counts
+    line_counts = [len(content.split('\n')) for content in files_content.values()]
+    
+    if line_counts:
+        metrics["average_lines_per_file"] = round(statistics.mean(line_counts), 1)
+        metrics["max_lines"] = max(line_counts)
+    
+    # Simple complexity estimation based on code characteristics
+    complexities = []
+    for file_path, content in files_content.items():
+        complexity = await estimate_file_complexity(file_path, content)
+        complexities.append(complexity)
+    
+    if complexities:
+        metrics["average_complexity"] = round(statistics.mean(complexities), 1)
+        metrics["max_complexity"] = max(complexities)
+    
+    # File size distribution
+    size_ranges = {"small": 0, "medium": 0, "large": 0, "very_large": 0}
+    for content in files_content.values():
+        lines = len(content.split('\n'))
+        if lines < 100:
+            size_ranges["small"] += 1
+        elif lines < 300:
+            size_ranges["medium"] += 1
+        elif lines < 500:
+            size_ranges["large"] += 1
+        else:
+            size_ranges["very_large"] += 1
+    
+    total_files = len(files_content)
+    if total_files > 0:
+        metrics["file_size_distribution"] = {
+            k: round(v / total_files * 100, 1) for k, v in size_ranges.items()
         }
     
-    def _analyze_file_distribution(self, repository: Dict) -> Dict:
-        """Analyze how files are distributed across the repository"""
-        # Count files per directory
-        dir_counts = {}
-        
-        for file in repository["files"]:
-            path = file.get("path", "")
-            directory = os.path.dirname(path)
-            
-            if not directory:
-                directory = "/"
-            
-            dir_counts[directory] = dir_counts.get(directory, 0) + 1
-        
-        # Get directories with the most files
-        top_directories = sorted(dir_counts.items(), key=lambda x: x[1], reverse=True)[:10]
-        
-        # Calculate directory depth statistics
-        depths = [len(path.split("/")) - 1 for path in dir_counts.keys()]
-        avg_depth = sum(depths) / len(depths) if depths else 0
-        max_depth = max(depths) if depths else 0
-        
-        return {
-            "directory_count": len(dir_counts),
-            "top_directories": top_directories,
-            "average_directory_depth": avg_depth,
-            "maximum_directory_depth": max_depth
-        }
+    return metrics
 
-# Instance to be imported by other modules
-structural_analyzer = StructuralAnalyzer()
+async def estimate_file_complexity(file_path: str, content: str) -> float:
+    """Estimate complexity of a file based on characteristics"""
+    lines = content.split('\n')
+    extension = os.path.splitext(file_path)[1].lower()
+    
+    # Base complexity starts at 1.0
+    complexity = 1.0
+    
+    # Factor 1: Line count
+    line_count = len(lines)
+    if line_count > 500:
+        complexity += 3.0
+    elif line_count > 300:
+        complexity += 2.0
+    elif line_count > 100:
+        complexity += 1.0
+    
+    # Factor 2: Nesting level
+    indentation_levels = []
+    for line in lines:
+        if line.strip() and not line.strip().startswith(('#', '//', '/*', '*')):
+            indent = len(line) - len(line.lstrip())
+            indentation_levels.append(indent)
+    
+    if indentation_levels:
+        avg_indent = sum(indentation_levels) / len(indentation_levels)
+        max_indent = max(indentation_levels) if indentation_levels else 0
+        
+        # More indentation means more complexity
+        if max_indent > 20:
+            complexity += 2.0
+        elif max_indent > 12:
+            complexity += 1.0
+        
+        if avg_indent > 8:
+            complexity += 1.0
+    
+    # Factor 3: Language-specific complexity indicators
+    if extension in ('.py', '.js', '.ts'):
+        # Count conditional statements and loops
+        control_keywords = ['if', 'for', 'while', 'switch', 'case']
+        keyword_count = sum(line.strip().startswith(kw) for kw in control_keywords for line in lines)
+        keyword_density = keyword_count / max(1, line_count)
+        
+        if keyword_density > 0.1:
+            complexity += 1.0
+    
+    # Factor 4: Function/method count
+    function_indicators = {
+        '.py': ['def ', 'async def '],
+        '.js': ['function ', 'const ', '=>'],
+        '.ts': ['function ', 'const ', '=>'],
+        '.java': ['public ', 'private ', 'protected ', 'void ', 'static '],
+        '.c': [') {', ') {'],
+        '.cpp': [') {', ') {'],
+        '.cs': ['public ', 'private ', 'protected ', 'void ', 'static '],
+    }
+    
+    indicators = function_indicators.get(extension, [') {'])
+    function_count = sum(
+        1 for line in lines 
+        if any(indicator in line for indicator in indicators)
+    )
+    
+    if function_count > 20:
+        complexity += 2.0
+    elif function_count > 10:
+        complexity += 1.0
+    
+    # Cap complexity at 10
+    return min(10.0, complexity)
+
+async def build_dependency_graph(files_content: Dict[str, str]) -> Dict[str, List[str]]:
+    """Build a basic dependency graph between files"""
+    dependency_graph = {}
+    file_basenames = {
+        os.path.splitext(os.path.basename(path))[0]: path 
+        for path in files_content.keys()
+    }
+    
+    for file_path, content in files_content.items():
+        dependencies = []
+        
+        # Look for import statements
+        import_patterns = {
+            '.py': ['import ', 'from '],
+            '.js': ['import ', 'require('],
+            '.ts': ['import ', 'require('],
+            '.java': ['import '],
+            '.cpp': ['#include '],
+            '.c': ['#include '],
+        }
+        
+        extension = os.path.splitext(file_path)[1]
+        patterns = import_patterns.get(extension, [])
+        
+        # Simple heuristic detection of imports
+        for line in content.split('\n'):
+            line = line.strip()
+            for pattern in patterns:
+                if line.startswith(pattern):
+                    # Extract the imported module name
+                    parts = line.split()
+                    if len(parts) > 1:
+                        module_name = parts[1].strip('";\'')
+                        # Check if this import refers to one of our files
+                        base_module = module_name.split('.')[0].split('/')[0]
+                        if base_module in file_basenames and file_basenames[base_module] != file_path:
+                            dependencies.append(file_basenames[base_module])
+        
+        dependency_graph[file_path] = dependencies
+    
+    return dependency_graph

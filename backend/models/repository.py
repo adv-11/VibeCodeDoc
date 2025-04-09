@@ -1,22 +1,34 @@
-# backend/models/repository.py
-from typing import Dict, List, Optional
+from pydantic import BaseModel, HttpUrl
+from typing import List, Optional, Dict
+from datetime import datetime
+from enum import Enum
 
-class Repository:
-    """Represents a code repository."""
+class RepositoryStatus(str, Enum):
+    PENDING = "pending"
+    CLONING = "cloning"
+    ANALYZING = "analyzing"
+    COMPLETED = "completed"
+    FAILED = "failed"
 
-    def __init__(self, name: str, owner: str, url: str, language: Optional[str] = None):
-        self.name = name
-        self.owner = owner
-        self.url = url
-        self.language = language
+class FileInfo(BaseModel):
+    path: str
+    size: int
+    extension: str
+    content: Optional[str] = None
 
-    def __repr__(self):
-        return f"Repository(name='{self.name}', owner='{self.owner}', url='{self.url}', language='{self.language}')"
+class Directory(BaseModel):
+    path: str
+    files: List[FileInfo] = []
+    subdirectories: List['Directory'] = []
 
-    def to_dict(self):
-        return {
-            "name": self.name,
-            "owner": self.owner,
-            "url": self.url,
-            "language": self.language
-        }
+class Repository(BaseModel):
+    id: str
+    url: HttpUrl
+    branch: str = "main"
+    status: RepositoryStatus = RepositoryStatus.PENDING
+    created_at: datetime = datetime.now()
+    updated_at: datetime = datetime.now()
+    clone_path: Optional[str] = None
+    structure: Optional[Directory] = None
+    metadata: Dict[str, any] = {}
+    error: Optional[str] = None
